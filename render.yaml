@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: espn-proxy
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: PROXY_API_KEY
+        generateValue: true

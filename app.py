@@ -18,6 +18,25 @@ ESPN_HEADERS = {
 
 API_KEY = os.getenv("PROXY_API_KEY", "cambiame")
 
+# IDs de tipo ESPN
+_TIPOS_GOL      = {"70", "137"}
+_TIPOS_AMARILLA = {"94"}
+_TIPOS_ROJA     = {"93"}
+_TIPOS_INICIO   = {"80", "82"}
+_TIPOS_FIN      = {"81", "83"}
+
+# Estadísticas a incluir (label ESPN → label para el bot)
+_STATS_LABELS = {
+    "Possession":    "Posesión",
+    "SHOTS":         "Tiros",
+    "ON GOAL":       "Al arco",
+    "Corner Kicks":  "Córners",
+    "Fouls":         "Faltas",
+    "Saves":         "Atajadas",
+    "Yellow Cards":  "Amarillas",
+    "Red Cards":     "Rojas",
+}
+
 
 def espn_get(url: str) -> dict:
     req = urllib.request.Request(url, headers=ESPN_HEADERS)
@@ -32,22 +51,46 @@ def _auth():
 
 
 def _parsear_jugador(texto: str) -> str:
-    """Extrae el nombre del jugador del texto de ESPN. Ej: 'Alistair Johnston (Canada) is shown...' → 'Alistair Johnston'"""
+    """Extrae nombre del jugador del texto ESPN."""
     if not texto:
         return ""
-    m = re.match(r"^([^(]+?)\s*\(", texto.strip())
-    # Para goles: "Goal! Canada 0, X 1. Nombre Apellido (Equipo) header..."
     if texto.startswith("Goal!"):
         m = re.search(r"\.\s+([^(]+?)\s*\(", texto)
+    else:
+        m = re.match(r"^([^(]+?)\s*\(", texto.strip())
     return m.group(1).strip() if m else ""
 
 
-# IDs de tipo ESPN
-_TIPOS_GOL      = {"70", "137"}   # gol normal, gol de cabeza/otro
-_TIPOS_AMARILLA = {"94"}
-_TIPOS_ROJA     = {"93"}          # red card
-_TIPOS_INICIO   = {"80", "82"}    # kick off, second half start
-_TIPOS_FIN      = {"81", "83"}    # end of half
+def _parsear_asistencia(texto: str) -> str:
+    """Extrae el nombre del asistente del texto ESPN. Ej: 'Assisted by Promise David.' → 'Promise David'"""
+    if not texto:
+        return ""
+    m = re.search(r"[Aa]ssisted by ([^.]+)\.", texto)
+    return m.group(1).strip() if m else ""
+
+
+def _parsear_estadisticas(data: dict) -> dict:
+    """Extrae estadísticas relevantes del boxscore para ambos equipos."""
+    resultado = {}
+    try:
+        teams = data.get("boxscore", {}).get("teams", [])
+        for t in teams:
+            nombre = t.get("team", {}).get("displayName", "?")
+            stats_raw = {s["label"]: s["displayValue"] for s in t.get("statistics", [])}
+            stats_filtradas = {}
+            for label_espn, label_bot in _STATS_LABELS.items():
+                val = stats_raw.get(label_espn, "-")
+                # Posesión viene como "61.2", mostrar como "61%"
+                if label_espn == "Possession" and val != "-":
+                    try:
+                        val = f"{float(val):.0f}%"
+                    except Exception:
+                        val = f"{val}%"
+                stats_filtradas[label_bot] = val
+            resultado[nombre] = stats_filtradas
+    except Exception:
+        pass
+    return resultado
 
 
 @app.route("/partidos")
@@ -74,14 +117,14 @@ def partidos():
         status = comp.get("status", {})
 
         partidos_list.append({
-            "id":             event.get("id"),
-            "fecha":          event.get("date"),
-            "local":          home.get("team", {}).get("displayName", "?"),
-            "visitante":      away.get("team", {}).get("displayName", "?"),
-            "fase":           event.get("season", {}).get("slug", "Fase de grupos"),
-            "estado":         status.get("type", {}).get("description", "Scheduled"),
-            "score_local":    home.get("score", "-"),
-            "score_visitante":away.get("score", "-"),
+            "id":              event.get("id"),
+            "fecha":           event.get("date"),
+            "local":           home.get("team", {}).get("displayName", "?"),
+            "visitante":       away.get("team", {}).get("displayName", "?"),
+            "fase":            event.get("season", {}).get("slug", "Fase de grupos"),
+            "estado":          status.get("type", {}).get("description", "Scheduled"),
+            "score_local":     home.get("score", "-"),
+            "score_visitante": away.get("score", "-"),
         })
 
     return jsonify({"partidos": partidos_list, "total": len(partidos_list)})
@@ -89,7 +132,7 @@ def partidos():
 
 @app.route("/eventos/<espn_id>")
 def eventos(espn_id: str):
-    """Devuelve goles y tarjetas de un partido con jugador parseado del texto."""
+    """Devuelve goles (con asistencia), tarjetas y estadísticas del partido."""
     err = _auth()
     if err: return err
 
@@ -110,38 +153,39 @@ def eventos(espn_id: str):
         equipo  = ev.get("team", {}).get("displayName", "")
         clock   = ev.get("clock", {}).get("displayValue", "")
 
-        # Parsear jugador solo en eventos relevantes (goles y tarjetas)
-        jugador = _parsear_jugador(texto) if tipo_id in (_TIPOS_GOL | _TIPOS_AMARILLA | _TIPOS_ROJA) else ""
+        es_relevante = tipo_id in (_TIPOS_GOL | _TIPOS_AMARILLA | _TIPOS_ROJA)
+        jugador      = _parsear_jugador(texto)   if es_relevante else ""
+        asistencia   = _parsear_asistencia(texto) if tipo_id in _TIPOS_GOL else ""
+        autogol      = "own goal" in texto.lower() or "autogol" in texto.lower()
+        penalti      = "penalty" in texto.lower()
 
-        # Detectar autogol por texto
-        autogol = "own goal" in texto.lower() or "autogol" in texto.lower()
-        penalti = "penalty" in texto.lower()
-
-        # Normalizar tipo a string legible
-        if tipo_id in _TIPOS_GOL:
-            tipo_norm = "goal"
-        elif tipo_id in _TIPOS_AMARILLA:
-            tipo_norm = "yellow-card"
-        elif tipo_id in _TIPOS_ROJA:
-            tipo_norm = "red-card"
-        elif tipo_id in _TIPOS_INICIO:
-            tipo_norm = "kickoff"
-        elif tipo_id in _TIPOS_FIN:
-            tipo_norm = "end"
-        else:
-            tipo_norm = tipo_id  # otros: sustitución, lesión, etc.
+        if tipo_id in _TIPOS_GOL:       tipo_norm = "goal"
+        elif tipo_id in _TIPOS_AMARILLA: tipo_norm = "yellow-card"
+        elif tipo_id in _TIPOS_ROJA:     tipo_norm = "red-card"
+        elif tipo_id in _TIPOS_INICIO:   tipo_norm = "kickoff"
+        elif tipo_id in _TIPOS_FIN:      tipo_norm = "end"
+        else:                             tipo_norm = tipo_id
 
         eventos_list.append({
-            "tipo":    tipo_norm,
-            "minuto":  clock,
-            "equipo":  equipo,
-            "jugador": jugador,
-            "autogol": autogol,
-            "penalti": penalti,
-            "texto":   texto,
+            "tipo":       tipo_norm,
+            "minuto":     clock,
+            "equipo":     equipo,
+            "jugador":    jugador,
+            "asistencia": asistencia,
+            "autogol":    autogol,
+            "penalti":    penalti,
+            "texto":      texto,
         })
 
-    return jsonify({"espn_id": espn_id, "eventos": eventos_list, "total": len(eventos_list)})
+    # Estadísticas del boxscore
+    estadisticas = _parsear_estadisticas(data)
+
+    return jsonify({
+        "espn_id":      espn_id,
+        "eventos":      eventos_list,
+        "estadisticas": estadisticas,
+        "total":        len(eventos_list),
+    })
 
 
 @app.route("/health")

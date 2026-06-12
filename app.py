@@ -227,6 +227,30 @@ def eventos(espn_id: str):
     })
 
 
+
+@app.route("/debug/<espn_id>")
+def debug_stats(espn_id: str):
+    """Devuelve los labels RAW del boxscore para diagnosticar estadísticas faltantes."""
+    err = _auth()
+    if err: return err
+
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary"
+        f"?event={espn_id}"
+    )
+    try:
+        data = espn_get(url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    resultado = {}
+    for t in data.get("boxscore", {}).get("teams", []):
+        nombre = t.get("team", {}).get("displayName", "?")
+        resultado[nombre] = {s["label"]: s["displayValue"] for s in t.get("statistics", [])}
+
+    return jsonify(resultado)
+
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})

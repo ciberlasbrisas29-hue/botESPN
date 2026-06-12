@@ -110,8 +110,8 @@ def eventos(espn_id: str):
         equipo  = ev.get("team", {}).get("displayName", "")
         clock   = ev.get("clock", {}).get("displayValue", "")
 
-        # Parsear jugador del texto porque athletesInvolved viene vacío
-        jugador = _parsear_jugador(texto)
+        # Parsear jugador solo en eventos relevantes (goles y tarjetas)
+        jugador = _parsear_jugador(texto) if tipo_id in (_TIPOS_GOL | _TIPOS_AMARILLA | _TIPOS_ROJA) else ""
 
         # Detectar autogol por texto
         autogol = "own goal" in texto.lower() or "autogol" in texto.lower()

@@ -7,6 +7,7 @@ from flask import Flask, jsonify, request
 import urllib.request
 import json
 import os
+import re
 
 app = Flask(__name__)
 
@@ -15,7 +16,6 @@ ESPN_HEADERS = {
     "Accept": "application/json",
 }
 
-# Clave simple para que solo tu bot pueda usarlo
 API_KEY = os.getenv("PROXY_API_KEY", "cambiame")
 
 
@@ -31,12 +31,31 @@ def _auth():
     return None
 
 
+def _parsear_jugador(texto: str) -> str:
+    """Extrae el nombre del jugador del texto de ESPN. Ej: 'Alistair Johnston (Canada) is shown...' → 'Alistair Johnston'"""
+    if not texto:
+        return ""
+    m = re.match(r"^([^(]+?)\s*\(", texto.strip())
+    # Para goles: "Goal! Canada 0, X 1. Nombre Apellido (Equipo) header..."
+    if texto.startswith("Goal!"):
+        m = re.search(r"\.\s+([^(]+?)\s*\(", texto)
+    return m.group(1).strip() if m else ""
+
+
+# IDs de tipo ESPN
+_TIPOS_GOL      = {"70", "137"}   # gol normal, gol de cabeza/otro
+_TIPOS_AMARILLA = {"94"}
+_TIPOS_ROJA     = {"93"}          # red card
+_TIPOS_INICIO   = {"80", "82"}    # kick off, second half start
+_TIPOS_FIN      = {"81", "83"}    # end of half
+
+
 @app.route("/partidos")
 def partidos():
     err = _auth()
     if err: return err
 
-    fecha = request.args.get("fecha")  # YYYYMMDD, ej: 20260611
+    fecha = request.args.get("fecha")
     url = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
     if fecha:
         url += f"?dates={fecha}"
@@ -70,10 +89,7 @@ def partidos():
 
 @app.route("/eventos/<espn_id>")
 def eventos(espn_id: str):
-    """
-    Devuelve los eventos (goles, tarjetas) de un partido en vivo.
-    Cada item tiene: tipo, minuto, equipo, jugador, autogol, penalti
-    """
+    """Devuelve goles y tarjetas de un partido con jugador parseado del texto."""
     err = _auth()
     if err: return err
 
@@ -88,28 +104,41 @@ def eventos(espn_id: str):
         return jsonify({"error": str(e)}), 502
 
     eventos_list = []
-
-    # ESPN devuelve los eventos en data["keyEvents"] o data["commentary"]
-    # La fuente más completa para goles y tarjetas es data["rosters"] + data["header"]
-    # pero la más directa es el bloque "keyEvents" del summary
     for ev in data.get("keyEvents", []):
-        clock  = ev.get("clock", {}).get("displayValue", "")
-        text   = ev.get("text", "")
-        etype  = ev.get("type", {}).get("id", "")  # "goal", "yellow-card", "red-card"
-        team   = ev.get("team", {}).get("displayName", "")
-        atletas = ev.get("athletesInvolved", [])
-        jugador = atletas[0].get("displayName", "") if atletas else ""
-        autogol = ev.get("ownGoal", False) or "own goal" in text.lower() or "autogol" in text.lower()
-        penalti = ev.get("penaltyKick", False) or "penalty" in text.lower()
+        tipo_id = str(ev.get("type", {}).get("id", ""))
+        texto   = ev.get("text", "")
+        equipo  = ev.get("team", {}).get("displayName", "")
+        clock   = ev.get("clock", {}).get("displayValue", "")
+
+        # Parsear jugador del texto porque athletesInvolved viene vacío
+        jugador = _parsear_jugador(texto)
+
+        # Detectar autogol por texto
+        autogol = "own goal" in texto.lower() or "autogol" in texto.lower()
+        penalti = "penalty" in texto.lower()
+
+        # Normalizar tipo a string legible
+        if tipo_id in _TIPOS_GOL:
+            tipo_norm = "goal"
+        elif tipo_id in _TIPOS_AMARILLA:
+            tipo_norm = "yellow-card"
+        elif tipo_id in _TIPOS_ROJA:
+            tipo_norm = "red-card"
+        elif tipo_id in _TIPOS_INICIO:
+            tipo_norm = "kickoff"
+        elif tipo_id in _TIPOS_FIN:
+            tipo_norm = "end"
+        else:
+            tipo_norm = tipo_id  # otros: sustitución, lesión, etc.
 
         eventos_list.append({
-            "tipo":    etype,       # "goal" | "yellow-card" | "red-card" | "substitution" | ...
-            "minuto":  clock,       # "23'" o "45+2'"
-            "equipo":  team,
+            "tipo":    tipo_norm,
+            "minuto":  clock,
+            "equipo":  equipo,
             "jugador": jugador,
             "autogol": autogol,
             "penalti": penalti,
-            "texto":   text,        # descripción raw de ESPN por si acaso
+            "texto":   texto,
         })
 
     return jsonify({"espn_id": espn_id, "eventos": eventos_list, "total": len(eventos_list)})

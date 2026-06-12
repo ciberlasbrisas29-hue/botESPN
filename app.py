@@ -62,7 +62,7 @@ def _parsear_jugador(texto: str) -> str:
 
 
 def _parsear_asistencia(texto: str) -> str:
-    """Extrae el nombre del asistente del texto ESPN. Ej: 'Assisted by Promise David.' → 'Promise David'"""
+    """Extrae el nombre del asistente del texto ESPN."""
     if not texto:
         return ""
     m = re.search(r"[Aa]ssisted by ([^.]+)\.", texto)
@@ -80,7 +80,6 @@ def _parsear_estadisticas(data: dict) -> dict:
             stats_filtradas = {}
             for label_espn, label_bot in _STATS_LABELS.items():
                 val = stats_raw.get(label_espn, "-")
-                # Posesión viene como "61.2", mostrar como "61%"
                 if label_espn == "Possession" and val != "-":
                     try:
                         val = f"{float(val):.0f}%"
@@ -88,6 +87,45 @@ def _parsear_estadisticas(data: dict) -> dict:
                         val = f"{val}%"
                 stats_filtradas[label_bot] = val
             resultado[nombre] = stats_filtradas
+    except Exception:
+        pass
+    return resultado
+
+
+def _parsear_game_info(data: dict) -> dict:
+    """Extrae venue, attendance y árbitro principal del gameInfo de ESPN."""
+    resultado = {}
+    try:
+        gi = data.get("gameInfo", {})
+
+        # Venue
+        venue_raw = gi.get("venue", {})
+        if venue_raw:
+            resultado["venue"] = {
+                "id":        venue_raw.get("id", ""),
+                "fullName":  venue_raw.get("fullName", ""),
+                "shortName": venue_raw.get("shortName", ""),
+                "address": {
+                    "city":    venue_raw.get("address", {}).get("city", ""),
+                    "country": venue_raw.get("address", {}).get("country", ""),
+                },
+            }
+
+        # Attendance
+        attendance = gi.get("attendance")
+        if attendance:
+            resultado["attendance"] = attendance
+
+        # Árbitro principal (opcional, por si lo querés usar después)
+        officials = gi.get("officials", [])
+        referee = next(
+            (o.get("fullName") for o in officials
+             if o.get("position", {}).get("id") == "1"),
+            None
+        )
+        if referee:
+            resultado["referee"] = referee
+
     except Exception:
         pass
     return resultado
@@ -132,7 +170,7 @@ def partidos():
 
 @app.route("/eventos/<espn_id>")
 def eventos(espn_id: str):
-    """Devuelve goles (con asistencia), tarjetas y estadísticas del partido."""
+    """Devuelve goles (con asistencia), tarjetas, estadísticas y gameInfo del partido."""
     err = _auth()
     if err: return err
 
@@ -154,17 +192,17 @@ def eventos(espn_id: str):
         clock   = ev.get("clock", {}).get("displayValue", "")
 
         es_relevante = tipo_id in (_TIPOS_GOL | _TIPOS_AMARILLA | _TIPOS_ROJA)
-        jugador      = _parsear_jugador(texto)   if es_relevante else ""
+        jugador      = _parsear_jugador(texto)    if es_relevante else ""
         asistencia   = _parsear_asistencia(texto) if tipo_id in _TIPOS_GOL else ""
         autogol      = "own goal" in texto.lower() or "autogol" in texto.lower()
         penalti      = "penalty" in texto.lower()
 
-        if tipo_id in _TIPOS_GOL:       tipo_norm = "goal"
+        if tipo_id in _TIPOS_GOL:        tipo_norm = "goal"
         elif tipo_id in _TIPOS_AMARILLA: tipo_norm = "yellow-card"
         elif tipo_id in _TIPOS_ROJA:     tipo_norm = "red-card"
         elif tipo_id in _TIPOS_INICIO:   tipo_norm = "kickoff"
         elif tipo_id in _TIPOS_FIN:      tipo_norm = "end"
-        else:                             tipo_norm = tipo_id
+        else:                            tipo_norm = tipo_id
 
         eventos_list.append({
             "tipo":       tipo_norm,
@@ -177,13 +215,14 @@ def eventos(espn_id: str):
             "texto":      texto,
         })
 
-    # Estadísticas del boxscore
     estadisticas = _parsear_estadisticas(data)
+    game_info    = _parsear_game_info(data)
 
     return jsonify({
         "espn_id":      espn_id,
         "eventos":      eventos_list,
         "estadisticas": estadisticas,
+        "gameInfo":     game_info,
         "total":        len(eventos_list),
     })
 

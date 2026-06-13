@@ -185,6 +185,14 @@ def eventos(espn_id: str):
         return jsonify({"error": str(e)}), 502
 
     eventos_list = []
+    # Deduplicar tarjetas/goles dentro del mismo JSON de ESPN.
+    # Usamos minuto_base para tolerar variaciones de "+N'" en vivo.
+    _seen_cards: set = set()
+
+    def _minuto_base(clock: str) -> str:
+        """Normaliza '45+2\'' -> '45', '10\'' -> '10'."""
+        return re.split(r"[+\'\']", clock)[0].strip()
+
     for ev in data.get("keyEvents", []):
         tipo_id = str(ev.get("type", {}).get("id", ""))
         texto   = ev.get("text", "")
@@ -204,15 +212,23 @@ def eventos(espn_id: str):
         elif tipo_id in _TIPOS_FIN:      tipo_norm = "end"
         else:                            tipo_norm = tipo_id
 
+        # Deduplicar dentro del mismo response (ESPN a veces duplica keyEvents)
+        if tipo_norm in ("yellow-card", "red-card", "goal") and jugador:
+            dedup_key = (jugador.lower(), tipo_norm, equipo.lower(), _minuto_base(clock))
+            if dedup_key in _seen_cards:
+                continue
+            _seen_cards.add(dedup_key)
+
         eventos_list.append({
-            "tipo":       tipo_norm,
-            "minuto":     clock,
-            "equipo":     equipo,
-            "jugador":    jugador,
-            "asistencia": asistencia,
-            "autogol":    autogol,
-            "penalti":    penalti,
-            "texto":      texto,
+            "tipo":        tipo_norm,
+            "minuto":      clock,
+            "minuto_base": _minuto_base(clock),  # expuesto para que el bot lo use en su hash
+            "equipo":      equipo,
+            "jugador":     jugador,
+            "asistencia":  asistencia,
+            "autogol":     autogol,
+            "penalti":     penalti,
+            "texto":       texto,
         })
 
     estadisticas = _parsear_estadisticas(data)

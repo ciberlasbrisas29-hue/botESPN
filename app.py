@@ -158,54 +158,72 @@ def partidos():
             app.logger.warning(f"[partidos] slug={slug} error: {e}")
             return []
  
-    # Slugs que ESPN usa para el Mundial 2026 (grupo A-L + knockout)
-    WC_SLUGS = [
-        "fifa.world",
-        "fifa.world.2026",
-        "fifa.world.2026.1",   # grupo stage
-        "fifa.world.2026.2",   # round of 32
-    ]
+    # fifa.world es el unico slug valido de ESPN para el Mundial 2026.
+    # Pero el scoreboard solo devuelve los partidos "activos" o proximos inmediatos.
+    # Para obtener TODOS los partidos del dia usamos el endpoint de calendar/ondays
+    # que devuelve los event IDs del dia y luego fetcheamos cada uno.
+    for ev in _fetch_scoreboard("fifa.world", fecha):
+        eid = ev.get("id")
+        if eid and eid not in seen_ids:
+            seen_ids.add(eid)
+            all_events.append(ev)
  
-    for slug in WC_SLUGS:
-        for ev in _fetch_scoreboard(slug, fecha):
-            eid = ev.get("id")
-            if eid and eid not in seen_ids:
-                seen_ids.add(eid)
-                all_events.append(ev)
+    app.logger.info(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
+ 
+    # Complementar con el endpoint de calendar que lista TODOS los event IDs del dia
+    if fecha:
+        try:
+            cal_url = (
+                f"https://sports.core.api.espn.com/v2/sports/soccer/leagues/fifa.world"
+                f"/calendar/ondays?dates={fecha}&limit=100"
+            )
+            cal_data = espn_get(cal_url)
+            event_refs = cal_data.get("eventDate", {}).get("events", [])
+            # Cada ref tiene {"$ref": "...events/123"} — extraemos el ID
+            import re as _re
+            new_ids = []
+            for ref in event_refs:
+                href = ref.get("$ref", "")
+                m = _re.search(r"/events/(\d+)", href)
+                if m:
+                    eid = m.group(1)
+                    if eid not in seen_ids:
+                        new_ids.append(eid)
+                        seen_ids.add(eid)
+            app.logger.info(f"[partidos] calendar ondays -> {len(event_refs)} refs, {len(new_ids)} nuevos IDs a fetchear")
+            # Fetchear cada evento nuevo individualmente
+            for eid in new_ids:
+                try:
+                    ev_url = (
+                        f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
+                        f"/summary?event={eid}"
+                    )
+                    ev_data = espn_get(ev_url)
+                    # summary tiene estructura distinta — construir evento compatible
+                    ginfo = ev_data.get("gameInfo", {})
+                    header = ev_data.get("header", {})
+                    comps  = header.get("competitions", [{}])
+                    comp   = comps[0] if comps else {}
+                    teams  = comp.get("competitors", [])
+                    home   = next((t for t in teams if t.get("homeTeam") or t.get("order") == 0), teams[0] if teams else {})
+                    away   = next((t for t in teams if not (t.get("homeTeam") or t.get("order") == 0)), teams[1] if len(teams) > 1 else {})
+                    status = comp.get("status", {})
+                    all_events.append({
+                        "id":              eid,
+                        "date":            comp.get("date", ""),
+                        "season":          header.get("season", {}),
+                        "competitions": [{
+                            "competitors": teams,
+                            "status":      status,
+                            "date":        comp.get("date", ""),
+                        }],
+                    })
+                except Exception as ef:
+                    app.logger.warning(f"[partidos] fetch event {eid} error: {ef}")
+        except Exception as ec:
+            app.logger.warning(f"[partidos] calendar error: {ec}")
  
     app.logger.info(f"[partidos] Total final: {len(all_events)} partidos unicos para fecha={fecha}")
- 
-    # Si los slugs alternativos no ayudaron, intentar con la API v3 de ESPN
-    # que devuelve todos los eventos del dia en un solo request
-    if len(all_events) <= 3 and fecha:
-        try:
-            url_v3 = (
-                f"https://sports.core.api.espn.com/v3/sports/soccer/fifa.world/events"
-                f"?dates={fecha}&limit=50"
-            )
-            data_v3 = espn_get(url_v3)
-            items = data_v3.get("items", [])
-            app.logger.info(f"[partidos] v3 api devolvio {len(items)} items")
-            # v3 devuelve refs, necesitamos fetchear cada evento o usar el campo inline
-            for item in items:
-                eid = str(item.get("id", ""))
-                if eid and eid not in seen_ids:
-                    seen_ids.add(eid)
-                    # Construir evento minimo desde v3
-                    comps = item.get("competitions", [{}])
-                    comp  = comps[0] if comps else {}
-                    teams = comp.get("competitors", [])
-                    home  = next((t for t in teams if t.get("homeAway") == "home"), teams[0] if teams else {})
-                    away  = next((t for t in teams if t.get("homeAway") == "away"), teams[1] if len(teams) > 1 else {})
-                    all_events.append({
-                        "id":   eid,
-                        "date": item.get("date", ""),
-                        "name": item.get("name", ""),
-                        "season": item.get("season", {}),
-                        "competitions": comps,
-                    })
-        except Exception as e:
-            app.logger.warning(f"[partidos] v3 error: {e}")
  
     partidos_list = []
     for event in all_events:

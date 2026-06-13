@@ -146,8 +146,24 @@ def partidos():
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
+    # ESPN a veces pagina el scoreboard — recorremos todas las páginas
+    all_events = list(data.get("events", []))
+    import logging
+    logging.info(f"[partidos] ESPN devolvio {len(all_events)} eventos en pagina 1 para fecha={fecha}")
+    pageCount = data.get("pageCount", 1)
+    pageIndex = data.get("pageIndex", 1)
+    while pageIndex < pageCount:
+        pageIndex += 1
+        paged_url = url + ("&" if "?" in url else "?") + f"page={pageIndex}"
+        try:
+            paged_data = espn_get(paged_url)
+            all_events.extend(paged_data.get("events", []))
+            pageCount = paged_data.get("pageCount", pageCount)
+        except Exception:
+            break
+
     partidos_list = []
-    for event in data.get("events", []):
+    for event in all_events:
         comp   = event.get("competitions", [{}])[0]
         teams  = comp.get("competitors", [])
         home   = next((t for t in teams if t.get("homeAway") == "home"), teams[0] if teams else {})

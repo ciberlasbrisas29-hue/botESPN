@@ -158,31 +158,9 @@ def partidos():
             app.logger.warning(f"[partidos] slug={slug} error: {e}")
             return []
 
-    # fifa.world es el unico slug valido de ESPN para el Mundial 2026.
-    # Pero el scoreboard solo devuelve los partidos "activos" o proximos inmediatos.
-    # Para obtener TODOS los partidos del dia usamos el endpoint de calendar/ondays
-    # que devuelve los event IDs del dia y luego fetcheamos cada uno.
-    for ev in _fetch_scoreboard("fifa.world", fecha):
-        eid = ev.get("id")
-        if eid and eid not in seen_ids:
-            # Excluir partidos 00:00-05:59 UTC: pertenecen al dia anterior en UTC-6
-            # y ya se muestran ahi via el fetch nocturno. Evita duplicados entre dias.
-            ev_date = ev.get("date", "")
-            try:
-                from datetime import datetime as _dtm
-                ev_dt = _dtm.fromisoformat(ev_date.replace("Z", "+00:00"))
-                if 0 <= ev_dt.hour <= 5:
-                    app.logger.debug(f"[partidos] scoreboard skip nocturno anterior: id={eid} hora={ev_dt.hour}")
-                    continue
-            except Exception:
-                pass
-            seen_ids.add(eid)
-            all_events.append(ev)
-
-    app.logger.debug(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
-
-    # Partidos nocturnos (p.ej. 19:00h SV = 01:00 UTC +1 dia) aparecen en ESPN
-    # con la fecha UTC del dia siguiente. Siempre buscamos tambien esa fecha.
+    # Primero: fetch nocturno del dia siguiente para pre-cargar seen_ids
+    # con partidos que pertenecen a HOY en UTC-6 pero tienen fecha UTC del dia siguiente.
+    # Esto evita que el scoreboard principal los duplique.
     if fecha:
         from datetime import datetime, timedelta
         try:
@@ -208,20 +186,29 @@ def partidos():
                         if ev_date_only == fecha_next and 0 <= ev_dt.hour <= 5:
                             seen_ids.add(eid)
                             all_events.append(ev)
-                            app.logger.debug(
+                            app.logger.error(
                                 f"[partidos] nocturno agregado: id={eid} "
                                 f"fecha_utc={ev_date} nombre={ev.get('name','?')}"
                             )
                         else:
-                            app.logger.debug(
+                            app.logger.error(
                                 f"[partidos] nocturno DESCARTADO (hora={ev_dt.hour} fecha={ev_date_only}): "
                                 f"id={eid} nombre={ev.get('name','?')}"
                             )
                     except Exception as ep:
                         app.logger.debug(f"[partidos] parse fecha nocturno error: {ep} fecha={ev_date}")
-            app.logger.debug(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
+            app.logger.debug(f"[partidos] nocturno pre-cargado, seen_ids={len(seen_ids)}")
         except Exception as en:
             app.logger.debug(f"[partidos] fecha_next error: {en}")
+
+    # Segundo: scoreboard del dia actual — los nocturnos ya estan en seen_ids y se saltan
+    for ev in _fetch_scoreboard("fifa.world", fecha):
+        eid = ev.get("id")
+        if eid and eid not in seen_ids:
+            seen_ids.add(eid)
+            all_events.append(ev)
+
+    app.logger.debug(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
 
     # Complementar con la API core v2 que lista eventos por fecha con paginacion
     if fecha:

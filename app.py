@@ -205,10 +205,11 @@ def partidos():
     for ev in _fetch_scoreboard("fifa.world", fecha):
         eid = ev.get("id")
         if eid and eid not in seen_ids:
-            # Descartar partidos de días anteriores que ESPN "arrastra" como finalizados.
-            # Un partido es un remanente si su fecha UTC pertenece a un día ANTES del buscado
-            # y su estado ya es Final/post. Partidos de días anteriores que aún no terminaron
-            # no deberían existir, pero si aparecen los dejamos pasar para no perder info.
+            # Descartar remanentes del dia anterior que ESPN arrastra en el scoreboard.
+            # Caso 1: fecha_utc < fecha buscada y ya terminó.
+            # Caso 2: fecha_utc == fecha buscada, hora 00-05 UTC (= 18-23h UTC-6 del dia ANTERIOR)
+            #         y ya terminó — estos son partidos nocturnos del dia anterior que ya finalizaron.
+            #         Los partidos nocturnos del dia ACTUAL que aun no jugaron no tocan esta rama.
             if fecha:
                 try:
                     from datetime import datetime as _dt2
@@ -216,18 +217,31 @@ def partidos():
                     if ev_date_str:
                         ev_dt = _dt2.fromisoformat(ev_date_str.replace("Z", "+00:00"))
                         ev_date_only = ev_dt.strftime("%Y%m%d")
-                        if ev_date_only < fecha:
-                            # Partido de un día anterior — verificar si ya terminó
+                        is_early_utc = (ev_date_only == fecha and 0 <= ev_dt.hour <= 5)
+                        is_prev_day  = (ev_date_only < fecha)
+                        if is_early_utc or is_prev_day:
                             comp = (ev.get("competitions") or [{}])[0]
-                            status_type = comp.get("status", {}).get("type", {})
-                            estado = status_type.get("name", "") or status_type.get("description", "")
-                            if estado.lower() in ("post", "final", "full time", "status_full_time", "ft"):
-                                app.logger.warning(
-                                    f"[partidos] scoreboard DESCARTADO (remanente finalizado, "
-                                    f"fecha_utc={ev_date_only} < {fecha}): "
+                            status_raw  = comp.get("status", {})
+                            status_type = status_raw.get("type", {})
+                            estado = (
+                                status_type.get("name", "") or
+                                status_type.get("description", "") or
+                                status_type.get("state", "") or
+                                str(status_type.get("id", ""))
+                            ).lower()
+                            # Log en nivel ERROR para verlo siempre en Render
+                            app.logger.error(
+                                f"[partidos] remanente detectado: id={eid} "
+                                f"nombre={ev.get('name','?')} hora_utc={ev_dt.hour}h "
+                                f"fecha_utc={ev_date_only} estado='{estado}' "
+                                f"status_type={status_type}"
+                            )
+                            if estado in ("post", "final", "full time", "status_full_time", "ft", "fulltime", "3"):
+                                app.logger.error(
+                                    f"[partidos] scoreboard DESCARTADO (remanente): "
                                     f"id={eid} nombre={ev.get('name', '?')}"
                                 )
-                                seen_ids.add(eid)  # marcar para no procesarlo en el paso siguiente
+                                seen_ids.add(eid)
                                 continue
                 except Exception as _ef:
                     app.logger.debug(f"[partidos] filtro remanente error: {_ef}")

@@ -205,6 +205,32 @@ def partidos():
     for ev in _fetch_scoreboard("fifa.world", fecha):
         eid = ev.get("id")
         if eid and eid not in seen_ids:
+            # Descartar partidos de días anteriores que ESPN "arrastra" como finalizados.
+            # Un partido es un remanente si su fecha UTC pertenece a un día ANTES del buscado
+            # y su estado ya es Final/post. Partidos de días anteriores que aún no terminaron
+            # no deberían existir, pero si aparecen los dejamos pasar para no perder info.
+            if fecha:
+                try:
+                    from datetime import datetime as _dt2
+                    ev_date_str = ev.get("date", "")
+                    if ev_date_str:
+                        ev_dt = _dt2.fromisoformat(ev_date_str.replace("Z", "+00:00"))
+                        ev_date_only = ev_dt.strftime("%Y%m%d")
+                        if ev_date_only < fecha:
+                            # Partido de un día anterior — verificar si ya terminó
+                            comp = (ev.get("competitions") or [{}])[0]
+                            status_type = comp.get("status", {}).get("type", {})
+                            estado = status_type.get("name", "") or status_type.get("description", "")
+                            if estado.lower() in ("post", "final", "full time", "status_full_time", "ft"):
+                                app.logger.warning(
+                                    f"[partidos] scoreboard DESCARTADO (remanente finalizado, "
+                                    f"fecha_utc={ev_date_only} < {fecha}): "
+                                    f"id={eid} nombre={ev.get('name', '?')}"
+                                )
+                                seen_ids.add(eid)  # marcar para no procesarlo en el paso siguiente
+                                continue
+                except Exception as _ef:
+                    app.logger.debug(f"[partidos] filtro remanente error: {_ef}")
             seen_ids.add(eid)
             all_events.append(ev)
 

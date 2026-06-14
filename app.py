@@ -497,72 +497,127 @@ def debug_partidos():
     return jsonify(result)
 
 
+# ── Grupos / Standings ──────────────────────────────────────────────────────
+
+# Mapa de nombres openfootball → nombres ESPN/BANDERAS del bot
+_NOMBRE_MAP = {
+    "Bosnia & Herzegovina": "Bosnia-Herzegovina",
+    "Czech Republic":       "Czech Republic",
+    "DR Congo":             "DR Congo",
+    "Ivory Coast":          "Ivory Coast",
+    "USA":                  "United States",
+    "Turkey":               "Türkiye",
+    "Curaçao":              "Curaçao",
+}
+
+def _normalizar_nombre(nombre: str) -> str:
+    return _NOMBRE_MAP.get(nombre, nombre)
+
+def _calcular_standings_desde_partidos(matches: list) -> dict:
+    """Calcula standings desde lista de partidos con score.ft."""
+    from collections import defaultdict
+    standings = defaultdict(dict)
+
+    for m in matches:
+        score = m.get("score", {}).get("ft")
+        if not score:
+            continue
+        grupo = m.get("group", "?")
+        if grupo == "?":
+            continue
+        t1 = _normalizar_nombre(m["team1"])
+        t2 = _normalizar_nombre(m["team2"])
+        g1, g2 = int(score[0]), int(score[1])
+
+        for team in [t1, t2]:
+            if team not in standings[grupo]:
+                standings[grupo][team] = {"pj":0,"pg":0,"pe":0,"pp":0,"gf":0,"gc":0,"pts":0}
+
+        standings[grupo][t1]["pj"] += 1
+        standings[grupo][t1]["gf"] += g1
+        standings[grupo][t1]["gc"] += g2
+        standings[grupo][t2]["pj"] += 1
+        standings[grupo][t2]["gf"] += g2
+        standings[grupo][t2]["gc"] += g1
+
+        if g1 > g2:
+            standings[grupo][t1]["pg"] += 1; standings[grupo][t1]["pts"] += 3
+            standings[grupo][t2]["pp"] += 1
+        elif g1 == g2:
+            standings[grupo][t1]["pe"] += 1; standings[grupo][t1]["pts"] += 1
+            standings[grupo][t2]["pe"] += 1; standings[grupo][t2]["pts"] += 1
+        else:
+            standings[grupo][t2]["pg"] += 1; standings[grupo][t2]["pts"] += 3
+            standings[grupo][t1]["pp"] += 1
+
+    return standings
+
+# Equipos de cada grupo para mostrar incluso los que no han jugado (0 pts)
+_GRUPOS_EQUIPOS = {
+    "Group A": ["Mexico","South Korea","Czech Republic","South Africa"],
+    "Group B": ["Canada","Bosnia & Herzegovina","Qatar","Switzerland"],
+    "Group C": ["Scotland","Brazil","Morocco","Haiti"],
+    "Group D": ["USA","Australia","Turkey","Paraguay"],
+    "Group E": ["Germany","Curaçao","Ecuador","Ivory Coast"],
+    "Group F": ["Japan","Netherlands","Sweden","Tunisia"],
+    "Group G": ["Belgium","Egypt","Iran","New Zealand"],
+    "Group H": ["Cape Verde","Saudi Arabia","Spain","Uruguay"],
+    "Group I": ["France","Iraq","Norway","Senegal"],
+    "Group J": ["Argentina","Algeria","Austria","Jordan"],
+    "Group K": ["Colombia","DR Congo","Portugal","Uzbekistan"],
+    "Group L": ["Croatia","England","Ghana","Panama"],
+}
+
+
 @app.route("/grupos")
 def grupos():
     """
-    Retorna standings de todos los grupos del Mundial 2026.
-    ESPN endpoint: /apis/v2/sports/soccer/fifa.world/standings
-    Respuesta: { "grupos": [ { "nombre": "Grupo A", "equipos": [ {...}, ... ] }, ... ] }
+    Calcula standings de grupos del Mundial 2026 desde openfootball/worldcup.json.
+    Retorna: { grupos: [ { nombre, equipos: [{nombre, pj, pg, pe, pp, gf, gc, dg, pts}] } ] }
     """
     err = _auth()
     if err: return err
 
     try:
-        data = espn_get("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+        data = espn_get("https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json")
     except Exception as e:
-        app.logger.error(f"[grupos] error fetch standings: {e}")
+        app.logger.error(f"[grupos] error fetch openfootball: {e}")
         return jsonify({"error": str(e)}), 502
 
+    matches = data.get("matches", [])
+    standings = _calcular_standings_desde_partidos(matches)
+
+    # Construir todos los grupos en orden A-L
     grupos_list = []
-    # La respuesta de ESPN tiene una estructura: children[] con cada grupo
-    # Cada children tiene: name, standings.entries[]
-    # Cada entry tiene: team{displayName}, stats[{name, value}]
-    children = data.get("children", [])
-    if not children:
-        # Algunos endpoints devuelven directamente en "standings"
-        children = data.get("standings", {}).get("groups", [])
+    for g_key in ["Group A","Group B","Group C","Group D","Group E","Group F",
+                  "Group G","Group H","Group I","Group J","Group K","Group L"]:
+        g_standings = standings.get(g_key, {})
+        equipos_raw = _GRUPOS_EQUIPOS.get(g_key, list(g_standings.keys()))
 
-    for grupo in children:
-        nombre = grupo.get("name", "Grupo ?")
-        entries = grupo.get("standings", {}).get("entries", [])
         equipos = []
-        for entry in entries:
-            team = entry.get("team", {})
-            stats_raw = {s["name"]: s["value"] for s in entry.get("stats", [])}
-
-            # ESPN usa nombres estandar en stats:
-            # gamesPlayed, wins, losses, ties, pointsFor, pointsAgainst, pointDifferential, points
-            # Para futbol: gamesPlayed, wins, draws, losses, goalsFor, goalsAgainst, goalDifference, points
+        for eq_raw in equipos_raw:
+            eq = _normalizar_nombre(eq_raw)
+            s  = g_standings.get(eq, g_standings.get(eq_raw, {"pj":0,"pg":0,"pe":0,"pp":0,"gf":0,"gc":0,"pts":0}))
+            dg = s["gf"] - s["gc"]
             equipos.append({
-                "nombre":   team.get("displayName", "?"),
-                "abrev":    team.get("abbreviation", "?"),
-                "logo":     team.get("logos", [{}])[0].get("href", "") if team.get("logos") else "",
-                "pj":       int(stats_raw.get("gamesPlayed",      stats_raw.get("GP", 0))),
-                "pg":       int(stats_raw.get("wins",             stats_raw.get("W",  0))),
-                "pe":       int(stats_raw.get("draws",            stats_raw.get("D",  stats_raw.get("ties", 0)))),
-                "pp":       int(stats_raw.get("losses",           stats_raw.get("L",  0))),
-                "gf":       int(stats_raw.get("pointsFor",        stats_raw.get("goalsFor",      stats_raw.get("GF", 0)))),
-                "gc":       int(stats_raw.get("pointsAgainst",    stats_raw.get("goalsAgainst",  stats_raw.get("GA", 0)))),
-                "dg":       int(stats_raw.get("pointDifferential",stats_raw.get("goalDifference",stats_raw.get("GD", 0)))),
-                "pts":      int(stats_raw.get("points",           stats_raw.get("PTS", 0))),
-                "stats_raw": stats_raw,  # incluir raw para debug
+                "nombre": eq,
+                "pj":  s["pj"],
+                "pg":  s["pg"],
+                "pe":  s["pe"],
+                "pp":  s["pp"],
+                "gf":  s["gf"],
+                "gc":  s["gc"],
+                "dg":  dg,
+                "pts": s["pts"],
             })
-        grupos_list.append({"nombre": nombre, "equipos": equipos})
 
-    app.logger.info(f"[grupos] {len(grupos_list)} grupos devueltos")
-    return jsonify({"grupos": grupos_list, "total": len(grupos_list), "raw_keys": list(data.keys())})
+        # Ordenar: pts desc, dg desc, gf desc
+        equipos.sort(key=lambda x: (-x["pts"], -x["dg"], -x["gf"]))
+        grupos_list.append({"nombre": g_key, "equipos": equipos})
 
+    app.logger.info(f"[grupos] {len(grupos_list)} grupos, {len([m for m in matches if m.get('score',{}).get('ft')])} partidos con resultado")
+    return jsonify({"grupos": grupos_list, "total": len(grupos_list)})
 
-@app.route("/grupos/debug")
-def grupos_debug():
-    """Retorna la respuesta RAW de ESPN standings para diagnostico."""
-    err = _auth()
-    if err: return err
-    try:
-        data = espn_get("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))

@@ -168,7 +168,38 @@ def partidos():
             seen_ids.add(eid)
             all_events.append(ev)
  
-    app.logger.info(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
+    app.logger.error(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
+ 
+    # Partidos nocturnos (p.ej. 19:00h SV = 01:00 UTC +1 dia) aparecen en ESPN
+    # con la fecha UTC del dia siguiente. Siempre buscamos tambien esa fecha.
+    if fecha:
+        from datetime import datetime, timedelta
+        try:
+            dt_base = datetime.strptime(fecha, "%Y%m%d")
+            fecha_next = (dt_base + timedelta(days=1)).strftime("%Y%m%d")
+            next_url = (
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+                f"?dates={fecha_next}"
+            )
+            next_data = espn_get(next_url)
+            for ev in next_data.get("events", []):
+                eid = ev.get("id")
+                if eid and eid not in seen_ids:
+                    # Solo incluir si la hora UTC cae dentro del dia local buscado
+                    # (es decir, antes de las 06:00 UTC del dia siguiente)
+                    ev_date = ev.get("date", "")
+                    try:
+                        ev_dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
+                        # Partidos entre 00:00 y 06:00 UTC del dia siguiente
+                        # corresponden al dia anterior en zonas UTC-6
+                        if ev_dt.hour < 6:
+                            seen_ids.add(eid)
+                            all_events.append(ev)
+                    except Exception:
+                        pass
+            app.logger.error(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
+        except Exception as en:
+            app.logger.error(f"[partidos] fecha_next error: {en}")
  
     # Complementar con la API core v2 que lista eventos por fecha con paginacion
     if fecha:

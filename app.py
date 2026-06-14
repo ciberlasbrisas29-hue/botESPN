@@ -165,6 +165,17 @@ def partidos():
     for ev in _fetch_scoreboard("fifa.world", fecha):
         eid = ev.get("id")
         if eid and eid not in seen_ids:
+            # Excluir partidos 00:00-05:59 UTC: pertenecen al dia anterior en UTC-6
+            # y ya se muestran ahi via el fetch nocturno. Evita duplicados entre dias.
+            ev_date = ev.get("date", "")
+            try:
+                from datetime import datetime as _dtm
+                ev_dt = _dtm.fromisoformat(ev_date.replace("Z", "+00:00"))
+                if 0 <= ev_dt.hour <= 5:
+                    app.logger.debug(f"[partidos] scoreboard skip nocturno anterior: id={eid} hora={ev_dt.hour}")
+                    continue
+            except Exception:
+                pass
             seen_ids.add(eid)
             all_events.append(ev)
 

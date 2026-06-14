@@ -190,13 +190,23 @@ def partidos():
                     ev_date = ev.get("date", "")
                     try:
                         ev_dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
-                        # Partidos entre 00:00 y 06:00 UTC del dia siguiente
-                        # corresponden al dia anterior en zonas UTC-6
-                        if ev_dt.hour < 6:
+                        # Solo incluir partidos entre 00:00 y 05:59 UTC del dia siguiente
+                        # que corresponden a la noche del dia anterior en UTC-6
+                        # (19:00h - 23:59h SV = 01:00h - 05:59h UTC siguiente)
+                        if 0 <= ev_dt.hour <= 5:
                             seen_ids.add(eid)
                             all_events.append(ev)
-                    except Exception:
-                        pass
+                            app.logger.error(
+                                f"[partidos] nocturno agregado: id={eid} "
+                                f"fecha_utc={ev_date} nombre={ev.get('name','?')}"
+                            )
+                        else:
+                            app.logger.error(
+                                f"[partidos] nocturno DESCARTADO (hora={ev_dt.hour}): "
+                                f"id={eid} nombre={ev.get('name','?')}"
+                            )
+                    except Exception as ep:
+                        app.logger.error(f"[partidos] parse fecha nocturno error: {ep} fecha={ev_date}")
             app.logger.error(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
         except Exception as en:
             app.logger.error(f"[partidos] fecha_next error: {en}")
@@ -412,10 +422,11 @@ def health():
 @app.route("/debug/partidos")
 def debug_partidos():
     """Endpoint de diagnostico — ver que devuelve ESPN crudo. SIN AUTH temporal."""
-    # err = _auth()  # temporalmente desactivado para diagnostico
-    # if err: return err
+    err = _auth()
+    if err: return err
  
-    fecha = request.args.get("fecha", datetime.utcnow().strftime("%Y%m%d"))
+    from datetime import datetime as _dt
+    fecha = request.args.get("fecha", _dt.utcnow().strftime("%Y%m%d"))
  
     result = {"fecha": fecha, "scoreboard": [], "event_refs": [], "calendar_error": None}
  

@@ -496,6 +496,74 @@ def debug_partidos():
 
     return jsonify(result)
 
+
+@app.route("/grupos")
+def grupos():
+    """
+    Retorna standings de todos los grupos del Mundial 2026.
+    ESPN endpoint: /apis/v2/sports/soccer/fifa.world/standings
+    Respuesta: { "grupos": [ { "nombre": "Grupo A", "equipos": [ {...}, ... ] }, ... ] }
+    """
+    err = _auth()
+    if err: return err
+
+    try:
+        data = espn_get("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+    except Exception as e:
+        app.logger.error(f"[grupos] error fetch standings: {e}")
+        return jsonify({"error": str(e)}), 502
+
+    grupos_list = []
+    # La respuesta de ESPN tiene una estructura: children[] con cada grupo
+    # Cada children tiene: name, standings.entries[]
+    # Cada entry tiene: team{displayName}, stats[{name, value}]
+    children = data.get("children", [])
+    if not children:
+        # Algunos endpoints devuelven directamente en "standings"
+        children = data.get("standings", {}).get("groups", [])
+
+    for grupo in children:
+        nombre = grupo.get("name", "Grupo ?")
+        entries = grupo.get("standings", {}).get("entries", [])
+        equipos = []
+        for entry in entries:
+            team = entry.get("team", {})
+            stats_raw = {s["name"]: s["value"] for s in entry.get("stats", [])}
+
+            # ESPN usa nombres estandar en stats:
+            # gamesPlayed, wins, losses, ties, pointsFor, pointsAgainst, pointDifferential, points
+            # Para futbol: gamesPlayed, wins, draws, losses, goalsFor, goalsAgainst, goalDifference, points
+            equipos.append({
+                "nombre":   team.get("displayName", "?"),
+                "abrev":    team.get("abbreviation", "?"),
+                "logo":     team.get("logos", [{}])[0].get("href", "") if team.get("logos") else "",
+                "pj":       int(stats_raw.get("gamesPlayed",      stats_raw.get("GP", 0))),
+                "pg":       int(stats_raw.get("wins",             stats_raw.get("W",  0))),
+                "pe":       int(stats_raw.get("draws",            stats_raw.get("D",  stats_raw.get("ties", 0)))),
+                "pp":       int(stats_raw.get("losses",           stats_raw.get("L",  0))),
+                "gf":       int(stats_raw.get("pointsFor",        stats_raw.get("goalsFor",      stats_raw.get("GF", 0)))),
+                "gc":       int(stats_raw.get("pointsAgainst",    stats_raw.get("goalsAgainst",  stats_raw.get("GA", 0)))),
+                "dg":       int(stats_raw.get("pointDifferential",stats_raw.get("goalDifference",stats_raw.get("GD", 0)))),
+                "pts":      int(stats_raw.get("points",           stats_raw.get("PTS", 0))),
+                "stats_raw": stats_raw,  # incluir raw para debug
+            })
+        grupos_list.append({"nombre": nombre, "equipos": equipos})
+
+    app.logger.info(f"[grupos] {len(grupos_list)} grupos devueltos")
+    return jsonify({"grupos": grupos_list, "total": len(grupos_list), "raw_keys": list(data.keys())})
+
+
+@app.route("/grupos/debug")
+def grupos_debug():
+    """Retorna la respuesta RAW de ESPN standings para diagnostico."""
+    err = _auth()
+    if err: return err
+    try:
+        data = espn_get("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings")
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

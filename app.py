@@ -194,30 +194,52 @@ def partidos():
             # Fetchear cada evento nuevo individualmente
             for eid in new_ids:
                 try:
-                    ev_url = (
+                    # Usamos el mismo endpoint de summary que ya parseamos en /eventos
+                    sum_url = (
                         f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
                         f"/summary?event={eid}"
                     )
-                    ev_data = espn_get(ev_url)
-                    # summary tiene estructura distinta — construir evento compatible
-                    ginfo = ev_data.get("gameInfo", {})
-                    header = ev_data.get("header", {})
+                    sd = espn_get(sum_url)
+                    header = sd.get("header", {})
                     comps  = header.get("competitions", [{}])
                     comp   = comps[0] if comps else {}
                     teams  = comp.get("competitors", [])
-                    home   = next((t for t in teams if t.get("homeTeam") or t.get("order") == 0), teams[0] if teams else {})
-                    away   = next((t for t in teams if not (t.get("homeTeam") or t.get("order") == 0)), teams[1] if len(teams) > 1 else {})
                     status = comp.get("status", {})
+ 
+                    # El summary usa homeTeam/order en vez de homeAway — normalizar
+                    for t in teams:
+                        if "homeAway" not in t:
+                            t["homeAway"] = "home" if t.get("homeTeam", False) or t.get("order", 1) == 0 else "away"
+ 
+                    # El summary puede tener la fecha en distintos campos segun el estado
+                    fecha_ev = (
+                        comp.get("date") or
+                        comp.get("startDate") or
+                        header.get("gameDate") or
+                        header.get("date") or
+                        ""
+                    )
+                    # Normalizar displayName: el summary a veces lo tiene en team.shortDisplayName
+                    for t in teams:
+                        tm = t.get("team", {})
+                        if not tm.get("displayName"):
+                            tm["displayName"] = tm.get("shortDisplayName") or tm.get("name") or "?"
+                            t["team"] = tm
+ 
                     all_events.append({
-                        "id":              eid,
-                        "date":            comp.get("date", ""),
-                        "season":          header.get("season", {}),
+                        "id":          eid,
+                        "date":        fecha_ev,
+                        "season":      header.get("season", {}),
                         "competitions": [{
                             "competitors": teams,
                             "status":      status,
-                            "date":        comp.get("date", ""),
+                            "date":        fecha_ev,
                         }],
                     })
+                    app.logger.info(
+                        f"[partidos] evento {eid} agregado: fecha={fecha_ev} "
+                        f"teams={[t.get('team',{}).get('displayName') for t in teams]}"
+                    )
                 except Exception as ef:
                     app.logger.warning(f"[partidos] fetch event {eid} error: {ef}")
         except Exception as ec:

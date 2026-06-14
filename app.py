@@ -168,7 +168,7 @@ def partidos():
             seen_ids.add(eid)
             all_events.append(ev)
  
-    app.logger.error(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
+    app.logger.debug(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
  
     # Partidos nocturnos (p.ej. 19:00h SV = 01:00 UTC +1 dia) aparecen en ESPN
     # con la fecha UTC del dia siguiente. Siempre buscamos tambien esa fecha.
@@ -207,10 +207,10 @@ def partidos():
                                 f"id={eid} nombre={ev.get('name','?')}"
                             )
                     except Exception as ep:
-                        app.logger.error(f"[partidos] parse fecha nocturno error: {ep} fecha={ev_date}")
-            app.logger.error(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
+                        app.logger.debug(f"[partidos] parse fecha nocturno error: {ep} fecha={ev_date}")
+            app.logger.debug(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
         except Exception as en:
-            app.logger.error(f"[partidos] fecha_next error: {en}")
+            app.logger.debug(f"[partidos] fecha_next error: {en}")
  
     # Complementar con la API core v2 que lista eventos por fecha con paginacion
     if fecha:
@@ -236,7 +236,7 @@ def partidos():
                 if eid and eid not in seen_ids:
                     new_ids.append(eid)
                     seen_ids.add(eid)
-            app.logger.error(f"[partidos] core/events -> {len(items)} items, {len(new_ids)} nuevos IDs")
+            app.logger.debug(f"[partidos] core/events -> {len(items)} items, {len(new_ids)} nuevos IDs")
             # Fetchear cada evento nuevo individualmente
             for eid in new_ids:
                 try:
@@ -287,9 +287,9 @@ def partidos():
                         f"teams={[t.get('team',{}).get('displayName') for t in teams]}"
                     )
                 except Exception as ef:
-                    app.logger.error(f"[partidos] fetch event {eid} FALLO: {ef}")
+                    app.logger.debug(f"[partidos] fetch event {eid} FALLO: {ef}")
         except Exception as ec:
-            app.logger.error(f"[partidos] core/events FALLO: {ec}")
+            app.logger.debug(f"[partidos] core/events FALLO: {ec}")
  
     app.logger.info(f"[partidos] Total final: {len(all_events)} partidos unicos para fecha={fecha}")
  

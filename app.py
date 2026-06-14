@@ -190,10 +190,11 @@ def partidos():
                     ev_date = ev.get("date", "")
                     try:
                         ev_dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
-                        # Solo incluir partidos entre 00:00 y 05:59 UTC del dia siguiente
-                        # que corresponden a la noche del dia anterior en UTC-6
-                        # (19:00h - 23:59h SV = 01:00h - 05:59h UTC siguiente)
-                        if 0 <= ev_dt.hour <= 5:
+                        # Solo incluir si la fecha UTC del partido es exactamente
+                        # fecha_next (dia+1) y la hora es entre 00:00-05:59 UTC,
+                        # lo que corresponde a 18:00-23:59h en UTC-6 del dia buscado.
+                        ev_date_only = ev_dt.strftime("%Y%m%d")
+                        if ev_date_only == fecha_next and 0 <= ev_dt.hour <= 5:
                             seen_ids.add(eid)
                             all_events.append(ev)
                             app.logger.error(
@@ -202,7 +203,7 @@ def partidos():
                             )
                         else:
                             app.logger.error(
-                                f"[partidos] nocturno DESCARTADO (hora={ev_dt.hour}): "
+                                f"[partidos] nocturno DESCARTADO (hora={ev_dt.hour} fecha={ev_date_only}): "
                                 f"id={eid} nombre={ev.get('name','?')}"
                             )
                     except Exception as ep:

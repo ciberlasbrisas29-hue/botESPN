@@ -208,12 +208,12 @@ def partidos():
                         if ev_date_only == fecha_next and 0 <= ev_dt.hour <= 5:
                             seen_ids.add(eid)
                             all_events.append(ev)
-                            app.logger.error(
+                            app.logger.debug(
                                 f"[partidos] nocturno agregado: id={eid} "
                                 f"fecha_utc={ev_date} nombre={ev.get('name','?')}"
                             )
                         else:
-                            app.logger.error(
+                            app.logger.debug(
                                 f"[partidos] nocturno DESCARTADO (hora={ev_dt.hour} fecha={ev_date_only}): "
                                 f"id={eid} nombre={ev.get('name','?')}"
                             )

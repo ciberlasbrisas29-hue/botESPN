@@ -8,23 +8,23 @@ import urllib.request
 import json
 import os
 import re
- 
+
 app = Flask(__name__)
- 
+
 ESPN_HEADERS = {
     "User-Agent": "ESPN-Service/1.0",
     "Accept": "application/json",
 }
- 
+
 API_KEY = os.getenv("PROXY_API_KEY", "cambiame")
- 
+
 # IDs de tipo ESPN
 _TIPOS_GOL      = {"70", "137"}
 _TIPOS_AMARILLA = {"94"}
 _TIPOS_ROJA     = {"93"}
 _TIPOS_INICIO   = {"80", "82"}
 _TIPOS_FIN      = {"81", "83"}
- 
+
 # Estadísticas a incluir (label ESPN → label para el bot)
 _STATS_LABELS = {
     "Possession":    "Posesión",
@@ -36,20 +36,20 @@ _STATS_LABELS = {
     "Yellow Cards":  "Amarillas",
     "Red Cards":     "Rojas",
 }
- 
- 
+
+
 def espn_get(url: str) -> dict:
     req = urllib.request.Request(url, headers=ESPN_HEADERS)
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
- 
- 
+
+
 def _auth():
     if request.headers.get("X-Api-Key") != API_KEY:
         return jsonify({"error": "unauthorized"}), 401
     return None
- 
- 
+
+
 def _parsear_jugador(texto: str) -> str:
     """Extrae nombre del jugador del texto ESPN."""
     if not texto:
@@ -59,16 +59,16 @@ def _parsear_jugador(texto: str) -> str:
     else:
         m = re.match(r"^([^(]+?)\s*\(", texto.strip())
     return m.group(1).strip() if m else ""
- 
- 
+
+
 def _parsear_asistencia(texto: str) -> str:
     """Extrae el nombre del asistente del texto ESPN."""
     if not texto:
         return ""
     m = re.search(r"[Aa]ssisted by ([^.]+)\.", texto)
     return m.group(1).strip() if m else ""
- 
- 
+
+
 def _parsear_estadisticas(data: dict) -> dict:
     """Extrae estadísticas relevantes del boxscore para ambos equipos."""
     resultado = {}
@@ -90,14 +90,14 @@ def _parsear_estadisticas(data: dict) -> dict:
     except Exception:
         pass
     return resultado
- 
- 
+
+
 def _parsear_game_info(data: dict) -> dict:
     """Extrae venue, attendance y árbitro principal del gameInfo de ESPN."""
     resultado = {}
     try:
         gi = data.get("gameInfo", {})
- 
+
         # Venue
         venue_raw = gi.get("venue", {})
         if venue_raw:
@@ -110,12 +110,12 @@ def _parsear_game_info(data: dict) -> dict:
                     "country": venue_raw.get("address", {}).get("country", ""),
                 },
             }
- 
+
         # Attendance
         attendance = gi.get("attendance")
         if attendance:
             resultado["attendance"] = attendance
- 
+
         # Árbitro principal (opcional, por si lo querés usar después)
         officials = gi.get("officials", [])
         referee = next(
@@ -125,26 +125,26 @@ def _parsear_game_info(data: dict) -> dict:
         )
         if referee:
             resultado["referee"] = referee
- 
+
     except Exception:
         pass
     return resultado
- 
- 
+
+
 @app.route("/partidos")
 def partidos():
     err = _auth()
     if err: return err
- 
+
     fecha = request.args.get("fecha")
- 
+
     # ESPN tiene el Mundial fragmentado: el endpoint principal de fifa.world
     # solo devuelve algunos partidos. Para obtener todos usamos el endpoint
     # de calendar/ondays que devuelve los event IDs completos del dia,
     # y como fallback combinamos multiples slugs conocidos del Mundial 2026.
     all_events = []
     seen_ids = set()
- 
+
     def _fetch_scoreboard(slug, fecha_str):
         url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard"
         if fecha_str:
@@ -157,7 +157,7 @@ def partidos():
         except Exception as e:
             app.logger.warning(f"[partidos] slug={slug} error: {e}")
             return []
- 
+
     # fifa.world es el unico slug valido de ESPN para el Mundial 2026.
     # Pero el scoreboard solo devuelve los partidos "activos" o proximos inmediatos.
     # Para obtener TODOS los partidos del dia usamos el endpoint de calendar/ondays
@@ -167,9 +167,9 @@ def partidos():
         if eid and eid not in seen_ids:
             seen_ids.add(eid)
             all_events.append(ev)
- 
+
     app.logger.debug(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
- 
+
     # Partidos nocturnos (p.ej. 19:00h SV = 01:00 UTC +1 dia) aparecen en ESPN
     # con la fecha UTC del dia siguiente. Siempre buscamos tambien esa fecha.
     if fecha:
@@ -211,7 +211,7 @@ def partidos():
             app.logger.debug(f"[partidos] fecha_next={fecha_next} -> total ahora {len(all_events)} eventos")
         except Exception as en:
             app.logger.debug(f"[partidos] fecha_next error: {en}")
- 
+
     # Complementar con la API core v2 que lista eventos por fecha con paginacion
     if fecha:
         try:
@@ -251,12 +251,12 @@ def partidos():
                     comp   = comps[0] if comps else {}
                     teams  = comp.get("competitors", [])
                     status = comp.get("status", {})
- 
+
                     # El summary usa homeTeam/order en vez de homeAway — normalizar
                     for t in teams:
                         if "homeAway" not in t:
                             t["homeAway"] = "home" if t.get("homeTeam", False) or t.get("order", 1) == 0 else "away"
- 
+
                     # El summary puede tener la fecha en distintos campos segun el estado
                     fecha_ev = (
                         comp.get("date") or
@@ -271,7 +271,7 @@ def partidos():
                         if not tm.get("displayName"):
                             tm["displayName"] = tm.get("shortDisplayName") or tm.get("name") or "?"
                             t["team"] = tm
- 
+
                     all_events.append({
                         "id":          eid,
                         "date":        fecha_ev,
@@ -290,9 +290,9 @@ def partidos():
                     app.logger.debug(f"[partidos] fetch event {eid} FALLO: {ef}")
         except Exception as ec:
             app.logger.debug(f"[partidos] core/events FALLO: {ec}")
- 
+
     app.logger.info(f"[partidos] Total final: {len(all_events)} partidos unicos para fecha={fecha}")
- 
+
     partidos_list = []
     for event in all_events:
         comp   = event.get("competitions", [{}])[0]
@@ -300,7 +300,7 @@ def partidos():
         home   = next((t for t in teams if t.get("homeAway") == "home"), teams[0] if teams else {})
         away   = next((t for t in teams if t.get("homeAway") == "away"), teams[1] if len(teams) > 1 else {})
         status = comp.get("status", {})
- 
+
         partidos_list.append({
             "id":              event.get("id"),
             "fecha":           event.get("date"),
@@ -311,61 +311,61 @@ def partidos():
             "score_local":     home.get("score", "-"),
             "score_visitante": away.get("score", "-"),
         })
- 
+
     return jsonify({"partidos": partidos_list, "total": len(partidos_list)})
- 
- 
+
+
 @app.route("/eventos/<espn_id>")
 def eventos(espn_id: str):
     """Devuelve goles (con asistencia), tarjetas, estadísticas y gameInfo del partido."""
     err = _auth()
     if err: return err
- 
+
     url = (
         "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary"
         f"?event={espn_id}"
     )
- 
+
     try:
         data = espn_get(url)
     except Exception as e:
         return jsonify({"error": str(e)}), 502
- 
+
     eventos_list = []
     # Deduplicar tarjetas/goles dentro del mismo JSON de ESPN.
     # Usamos minuto_base para tolerar variaciones de "+N'" en vivo.
     _seen_cards: set = set()
- 
+
     def _minuto_base(clock: str) -> str:
         """Normaliza '45+2\'' -> '45', '10\'' -> '10'."""
         return re.split(r"[+\'\']", clock)[0].strip()
- 
+
     for ev in data.get("keyEvents", []):
         tipo_id = str(ev.get("type", {}).get("id", ""))
         texto   = ev.get("text", "")
         equipo  = ev.get("team", {}).get("displayName", "")
         clock   = ev.get("clock", {}).get("displayValue", "")
- 
+
         es_relevante = tipo_id in (_TIPOS_GOL | _TIPOS_AMARILLA | _TIPOS_ROJA)
         jugador      = _parsear_jugador(texto)    if es_relevante else ""
         asistencia   = _parsear_asistencia(texto) if tipo_id in _TIPOS_GOL else ""
         autogol      = "own goal" in texto.lower() or "autogol" in texto.lower()
         penalti      = "penalty" in texto.lower()
- 
+
         if tipo_id in _TIPOS_GOL:        tipo_norm = "goal"
         elif tipo_id in _TIPOS_AMARILLA: tipo_norm = "yellow-card"
         elif tipo_id in _TIPOS_ROJA:     tipo_norm = "red-card"
         elif tipo_id in _TIPOS_INICIO:   tipo_norm = "kickoff"
         elif tipo_id in _TIPOS_FIN:      tipo_norm = "end"
         else:                            tipo_norm = tipo_id
- 
+
         # Deduplicar dentro del mismo response (ESPN a veces duplica keyEvents)
         if tipo_norm in ("yellow-card", "red-card", "goal") and jugador:
             dedup_key = (jugador.lower(), tipo_norm, equipo.lower(), _minuto_base(clock))
             if dedup_key in _seen_cards:
                 continue
             _seen_cards.add(dedup_key)
- 
+
         eventos_list.append({
             "tipo":        tipo_norm,
             "minuto":      clock,
@@ -377,10 +377,10 @@ def eventos(espn_id: str):
             "penalti":     penalti,
             "texto":       texto,
         })
- 
+
     estadisticas = _parsear_estadisticas(data)
     game_info    = _parsear_game_info(data)
- 
+
     return jsonify({
         "espn_id":      espn_id,
         "eventos":      eventos_list,
@@ -388,15 +388,15 @@ def eventos(espn_id: str):
         "gameInfo":     game_info,
         "total":        len(eventos_list),
     })
- 
- 
- 
+
+
+
 @app.route("/debug/<espn_id>")
 def debug_stats(espn_id: str):
     """Devuelve los labels RAW del boxscore para diagnosticar estadísticas faltantes."""
     err = _auth()
     if err: return err
- 
+
     url = (
         "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary"
         f"?event={espn_id}"
@@ -405,32 +405,32 @@ def debug_stats(espn_id: str):
         data = espn_get(url)
     except Exception as e:
         return jsonify({"error": str(e)}), 502
- 
+
     resultado = {}
     for t in data.get("boxscore", {}).get("teams", []):
         nombre = t.get("team", {}).get("displayName", "?")
         resultado[nombre] = {s["label"]: s["displayValue"] for s in t.get("statistics", [])}
- 
+
     return jsonify(resultado)
- 
- 
+
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
- 
- 
- 
+
+
+
 @app.route("/debug/partidos")
 def debug_partidos():
     """Endpoint de diagnostico — ver que devuelve ESPN crudo. SIN AUTH temporal."""
     err = _auth()
     if err: return err
- 
+
     from datetime import datetime as _dt
     fecha = request.args.get("fecha", _dt.utcnow().strftime("%Y%m%d"))
- 
+
     result = {"fecha": fecha, "scoreboard": [], "event_refs": [], "calendar_error": None}
- 
+
     # Scoreboard
     try:
         sb_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates={fecha}"
@@ -439,7 +439,7 @@ def debug_partidos():
             result["scoreboard"].append({"id": ev.get("id"), "name": ev.get("name"), "date": ev.get("date")})
     except Exception as e:
         result["scoreboard_error"] = str(e)
- 
+
     # Calendar ondays
     try:
         cal_url = (
@@ -455,9 +455,9 @@ def debug_partidos():
             result["event_refs"].append({"ref": href, "id": m.group(1) if m else None})
     except Exception as e:
         result["events_error"] = str(e)
- 
+
     return jsonify(result)
- 
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

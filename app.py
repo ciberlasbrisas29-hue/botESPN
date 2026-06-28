@@ -131,6 +131,57 @@ def _parsear_game_info(data: dict) -> dict:
     return resultado
 
 
+
+def _detectar_definicion(comp: dict, eventos: list | None = None) -> str:
+    """
+    Detecta si un partido terminó en 90', tiempo extra (ET) o penales (PEN).
+    Fuentes en orden de confianza:
+      1. shootoutScore en alguno de los competitors → PEN
+      2. score.shootout presente → PEN
+      3. Gol en minuto > 90 en keyEvents → ET (puede coexistir con PEN)
+      4. status.type.description contiene "Shootout" o "Penalty" → PEN
+      5. status.type.description contiene "OT" / "Extra" → ET
+      6. No hay evidencia → "90" (partido resuelto en tiempo regular)
+    """
+    try:
+        # Fuente 1: shootoutScore en competitors
+        teams = comp.get("competitors", [])
+        for t in teams:
+            ss = t.get("shootoutScore")
+            if ss is not None and str(ss) not in ("", "0", "null"):
+                return "PEN"
+
+        # Fuente 2: score.shootout
+        for t in teams:
+            score = t.get("score", {})
+            if isinstance(score, dict) and score.get("shootout"):
+                return "PEN"
+
+        # Fuente 3: status description
+        desc = (
+            comp.get("status", {}).get("type", {}).get("description", "") or ""
+        ).lower()
+        if any(k in desc for k in ("shootout", "penalty", "penalties")):
+            return "PEN"
+        if any(k in desc for k in ("overtime", "extra time", "aet")):
+            return "ET"
+
+        # Fuente 4: goles en keyEvents con minuto > 90
+        if eventos:
+            for ev in eventos:
+                if ev.get("tipo") == "goal":
+                    try:
+                        minuto = int(str(ev.get("minuto_base", ev.get("minuto", "0"))).replace("'", "").strip())
+                        if minuto > 90:
+                            return "ET"
+                    except (ValueError, TypeError):
+                        pass
+
+    except Exception:
+        pass
+
+    return "90"
+
 @app.route("/partidos")
 def partidos():
     err = _auth()
@@ -339,15 +390,35 @@ def partidos():
         away   = next((t for t in teams if t.get("homeAway") == "away"), teams[1] if len(teams) > 1 else {})
         status = comp.get("status", {})
 
+        # shootoutScore: goles convertidos en la tanda de penales (None si no hubo)
+        shoot_home = home.get("shootoutScore")
+        shoot_away = away.get("shootoutScore")
+        # Normalizar: ESPN puede devolver int, str o None
+        def _norm_shoot(v):
+            if v is None: return None
+            try: return int(v)
+            except (ValueError, TypeError): return None
+        shoot_home = _norm_shoot(shoot_home)
+        shoot_away = _norm_shoot(shoot_away)
+
+        # Definicion: "90" | "ET" | "PEN"
+        # Solo calculamos si el partido ya terminó (estado post)
+        estado_raw = status.get("type", {}).get("name", "").lower()
+        es_finalizado = estado_raw in ("post", "final", "status_final", "3") or                         status.get("type", {}).get("state", "") == "post"
+        definicion = _detectar_definicion(comp) if es_finalizado else None
+
         partidos_list.append({
-            "id":              event.get("id"),
-            "fecha":           event.get("date"),
-            "local":           home.get("team", {}).get("displayName", "?"),
-            "visitante":       away.get("team", {}).get("displayName", "?"),
-            "fase":            event.get("season", {}).get("slug", "Fase de grupos"),
-            "estado":          status.get("type", {}).get("description", "Scheduled"),
-            "score_local":     home.get("score", "-"),
-            "score_visitante": away.get("score", "-"),
+            "id":               event.get("id"),
+            "fecha":            event.get("date"),
+            "local":            home.get("team", {}).get("displayName", "?"),
+            "visitante":        away.get("team", {}).get("displayName", "?"),
+            "fase":             event.get("season", {}).get("slug", "Fase de grupos"),
+            "estado":           status.get("type", {}).get("description", "Scheduled"),
+            "score_local":      home.get("score", "-"),
+            "score_visitante":  away.get("score", "-"),
+            "shootout_local":   shoot_home,   # None si no hubo penales
+            "shootout_visitante": shoot_away,
+            "definicion":       definicion,   # "90" | "ET" | "PEN" | None (en curso/no finalizado)
         })
 
     return jsonify({"partidos": partidos_list, "total": len(partidos_list)})
@@ -419,12 +490,33 @@ def eventos(espn_id: str):
     estadisticas = _parsear_estadisticas(data)
     game_info    = _parsear_game_info(data)
 
+    # Detectar definición usando keyEvents ya parseados + datos del comp
+    try:
+        header_comp = data.get("header", {}).get("competitions", [{}])[0]
+        definicion = _detectar_definicion(header_comp, eventos_list)
+    except Exception:
+        definicion = "90"
+
+    # shootoutScore por equipo desde el header
+    shoot = {}
+    try:
+        for t in data.get("header", {}).get("competitions", [{}])[0].get("competitors", []):
+            nombre = t.get("team", {}).get("displayName", "")
+            ss = t.get("shootoutScore")
+            if ss is not None:
+                try: shoot[nombre] = int(ss)
+                except (ValueError, TypeError): pass
+    except Exception:
+        pass
+
     return jsonify({
-        "espn_id":      espn_id,
-        "eventos":      eventos_list,
-        "estadisticas": estadisticas,
-        "gameInfo":     game_info,
-        "total":        len(eventos_list),
+        "espn_id":        espn_id,
+        "eventos":        eventos_list,
+        "estadisticas":   estadisticas,
+        "gameInfo":       game_info,
+        "definicion":     definicion,   # "90" | "ET" | "PEN"
+        "shootoutScores": shoot,        # {"Argentina": 4, "Francia": 2} o {}
+        "total":          len(eventos_list),
     })
 
 

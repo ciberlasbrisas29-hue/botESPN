@@ -116,7 +116,7 @@ def _parsear_game_info(data: dict) -> dict:
         if attendance:
             resultado["attendance"] = attendance
 
-        # Árbitro principal (opcional, por si lo querés usar después)
+        # Árbitro principal
         officials = gi.get("officials", [])
         referee = next(
             (o.get("fullName") for o in officials
@@ -131,33 +131,19 @@ def _parsear_game_info(data: dict) -> dict:
     return resultado
 
 
-
 def _detectar_definicion(comp: dict, eventos: list | None = None) -> str:
-    """
-    Detecta si un partido terminó en 90', tiempo extra (ET) o penales (PEN).
-    Fuentes en orden de confianza:
-      1. shootoutScore en alguno de los competitors → PEN
-      2. score.shootout presente → PEN
-      3. Gol en minuto > 90 en keyEvents → ET (puede coexistir con PEN)
-      4. status.type.description contiene "Shootout" o "Penalty" → PEN
-      5. status.type.description contiene "OT" / "Extra" → ET
-      6. No hay evidencia → "90" (partido resuelto en tiempo regular)
-    """
     try:
-        # Fuente 1: shootoutScore en competitors
         teams = comp.get("competitors", [])
         for t in teams:
             ss = t.get("shootoutScore")
             if ss is not None and str(ss) not in ("", "0", "null"):
                 return "PEN"
 
-        # Fuente 2: score.shootout
         for t in teams:
             score = t.get("score", {})
             if isinstance(score, dict) and score.get("shootout"):
                 return "PEN"
 
-        # Fuente 3: status description
         desc = (
             comp.get("status", {}).get("type", {}).get("description", "") or ""
         ).lower()
@@ -166,7 +152,6 @@ def _detectar_definicion(comp: dict, eventos: list | None = None) -> str:
         if any(k in desc for k in ("overtime", "extra time", "aet")):
             return "ET"
 
-        # Fuente 4: goles en keyEvents con minuto > 90
         if eventos:
             for ev in eventos:
                 if ev.get("tipo") == "goal":
@@ -189,10 +174,6 @@ def partidos():
 
     fecha = request.args.get("fecha")
 
-    # ESPN tiene el Mundial fragmentado: el endpoint principal de fifa.world
-    # solo devuelve algunos partidos. Para obtener todos usamos el endpoint
-    # de calendar/ondays que devuelve los event IDs completos del dia,
-    # y como fallback combinamos multiples slugs conocidos del Mundial 2026.
     all_events = []
     seen_ids = set()
 
@@ -209,9 +190,6 @@ def partidos():
             app.logger.warning(f"[partidos] slug={slug} error: {e}")
             return []
 
-    # Primero: fetch nocturno del dia siguiente para pre-cargar seen_ids
-    # con partidos que pertenecen a HOY en UTC-6 pero tienen fecha UTC del dia siguiente.
-    # Esto evita que el scoreboard principal los duplique.
     if fecha:
         from datetime import datetime, timedelta
         try:
@@ -225,14 +203,9 @@ def partidos():
             for ev in next_data.get("events", []):
                 eid = ev.get("id")
                 if eid and eid not in seen_ids:
-                    # Solo incluir si la hora UTC cae dentro del dia local buscado
-                    # (es decir, antes de las 06:00 UTC del dia siguiente)
                     ev_date = ev.get("date", "")
                     try:
                         ev_dt = datetime.fromisoformat(ev_date.replace("Z", "+00:00"))
-                        # Solo incluir si la fecha UTC del partido es exactamente
-                        # fecha_next (dia+1) y la hora es entre 00:00-05:59 UTC,
-                        # lo que corresponde a 18:00-23:59h en UTC-6 del dia buscado.
                         ev_date_only = ev_dt.strftime("%Y%m%d")
                         if ev_date_only == fecha_next and 0 <= ev_dt.hour <= 5:
                             seen_ids.add(eid)
@@ -252,15 +225,9 @@ def partidos():
         except Exception as en:
             app.logger.debug(f"[partidos] fecha_next error: {en}")
 
-    # Segundo: scoreboard del dia actual — los nocturnos ya estan en seen_ids y se saltan
     for ev in _fetch_scoreboard("fifa.world", fecha):
         eid = ev.get("id")
         if eid and eid not in seen_ids:
-            # Descartar remanentes del dia anterior que ESPN arrastra en el scoreboard.
-            # Caso 1: fecha_utc < fecha buscada y ya terminó.
-            # Caso 2: fecha_utc == fecha buscada, hora 00-05 UTC (= 18-23h UTC-6 del dia ANTERIOR)
-            #         y ya terminó — estos son partidos nocturnos del dia anterior que ya finalizaron.
-            #         Los partidos nocturnos del dia ACTUAL que aun no jugaron no tocan esta rama.
             if fecha:
                 try:
                     from datetime import datetime as _dt2
@@ -280,7 +247,6 @@ def partidos():
                                 status_type.get("state", "") or
                                 str(status_type.get("id", ""))
                             ).lower()
-                            # Log en nivel ERROR para verlo siempre en Render
                             app.logger.error(
                                 f"[partidos] remanente detectado: id={eid} "
                                 f"nombre={ev.get('name','?')} hora_utc={ev_dt.hour}h "
@@ -301,10 +267,8 @@ def partidos():
 
     app.logger.debug(f"[partidos] scoreboard -> {len(all_events)} eventos para fecha={fecha}")
 
-    # Complementar con la API core v2 que lista eventos por fecha con paginacion
     if fecha:
         try:
-            # Este endpoint devuelve TODOS los eventos del dia, no solo los "activos"
             events_url = (
                 f"https://sports.core.api.espn.com/v2/sports/soccer/leagues/fifa.world"
                 f"/events?dates={fecha}&limit=100"
@@ -312,10 +276,8 @@ def partidos():
             ev_data = espn_get(events_url)
             import re as _re
             new_ids = []
-            # Puede venir como lista directa o como {items: [...]}
             items = ev_data.get("items", ev_data.get("events", []))
             for item in items:
-                # Cada item puede ser un objeto completo o un $ref
                 href = item.get("$ref", "")
                 if href:
                     m = _re.search(r"/events/(\d+)", href)
@@ -326,10 +288,8 @@ def partidos():
                     new_ids.append(eid)
                     seen_ids.add(eid)
             app.logger.debug(f"[partidos] core/events -> {len(items)} items, {len(new_ids)} nuevos IDs")
-            # Fetchear cada evento nuevo individualmente
             for eid in new_ids:
                 try:
-                    # Usamos el mismo endpoint de summary que ya parseamos en /eventos
                     sum_url = (
                         f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world"
                         f"/summary?event={eid}"
@@ -341,12 +301,10 @@ def partidos():
                     teams  = comp.get("competitors", [])
                     status = comp.get("status", {})
 
-                    # El summary usa homeTeam/order en vez de homeAway — normalizar
                     for t in teams:
                         if "homeAway" not in t:
                             t["homeAway"] = "home" if t.get("homeTeam", False) or t.get("order", 1) == 0 else "away"
 
-                    # El summary puede tener la fecha en distintos campos segun el estado
                     fecha_ev = (
                         comp.get("date") or
                         comp.get("startDate") or
@@ -354,7 +312,6 @@ def partidos():
                         header.get("date") or
                         ""
                     )
-                    # Normalizar displayName: el summary a veces lo tiene en team.shortDisplayName
                     for t in teams:
                         tm = t.get("team", {})
                         if not tm.get("displayName"):
@@ -390,10 +347,8 @@ def partidos():
         away   = next((t for t in teams if t.get("homeAway") == "away"), teams[1] if len(teams) > 1 else {})
         status = comp.get("status", {})
 
-        # shootoutScore: goles convertidos en la tanda de penales (None si no hubo)
         shoot_home = home.get("shootoutScore")
         shoot_away = away.get("shootoutScore")
-        # Normalizar: ESPN puede devolver int, str o None
         def _norm_shoot(v):
             if v is None: return None
             try: return int(v)
@@ -401,10 +356,9 @@ def partidos():
         shoot_home = _norm_shoot(shoot_home)
         shoot_away = _norm_shoot(shoot_away)
 
-        # Definicion: "90" | "ET" | "PEN"
-        # Solo calculamos si el partido ya terminó (estado post)
         estado_raw = status.get("type", {}).get("name", "").lower()
-        es_finalizado = estado_raw in ("post", "final", "status_final", "3") or                         status.get("type", {}).get("state", "") == "post"
+        es_finalizado = estado_raw in ("post", "final", "status_final", "3") or \
+                        status.get("type", {}).get("state", "") == "post"
         definicion = _detectar_definicion(comp) if es_finalizado else None
 
         partidos_list.append({
@@ -416,9 +370,9 @@ def partidos():
             "estado":           status.get("type", {}).get("description", "Scheduled"),
             "score_local":      home.get("score", "-"),
             "score_visitante":  away.get("score", "-"),
-            "shootout_local":   shoot_home,   # None si no hubo penales
+            "shootout_local":   shoot_home,
             "shootout_visitante": shoot_away,
-            "definicion":       definicion,   # "90" | "ET" | "PEN" | None (en curso/no finalizado)
+            "definicion":       definicion,
         })
 
     return jsonify({"partidos": partidos_list, "total": len(partidos_list)})
@@ -441,13 +395,10 @@ def eventos(espn_id: str):
         return jsonify({"error": str(e)}), 502
 
     eventos_list = []
-    # Deduplicar tarjetas/goles dentro del mismo JSON de ESPN.
-    # Usamos minuto_base para tolerar variaciones de "+N'" en vivo.
     _seen_cards: set = set()
 
     def _minuto_base(clock: str) -> str:
-        """Normaliza '45+2\'' -> '45', '10\'' -> '10'."""
-        return re.split(r"[+\'\']", clock)[0].strip()
+        return re.split(r"[+\'\'']", clock)[0].strip()
 
     for ev in data.get("keyEvents", []):
         tipo_id = str(ev.get("type", {}).get("id", ""))
@@ -468,7 +419,6 @@ def eventos(espn_id: str):
         elif tipo_id in _TIPOS_FIN:      tipo_norm = "end"
         else:                            tipo_norm = tipo_id
 
-        # Deduplicar dentro del mismo response (ESPN a veces duplica keyEvents)
         if tipo_norm in ("yellow-card", "red-card", "goal") and jugador:
             dedup_key = (jugador.lower(), tipo_norm, equipo.lower(), _minuto_base(clock))
             if dedup_key in _seen_cards:
@@ -478,7 +428,7 @@ def eventos(espn_id: str):
         eventos_list.append({
             "tipo":        tipo_norm,
             "minuto":      clock,
-            "minuto_base": _minuto_base(clock),  # expuesto para que el bot lo use en su hash
+            "minuto_base": _minuto_base(clock),
             "equipo":      equipo,
             "jugador":     jugador,
             "asistencia":  asistencia,
@@ -490,14 +440,12 @@ def eventos(espn_id: str):
     estadisticas = _parsear_estadisticas(data)
     game_info    = _parsear_game_info(data)
 
-    # Detectar definición usando keyEvents ya parseados + datos del comp
     try:
         header_comp = data.get("header", {}).get("competitions", [{}])[0]
         definicion = _detectar_definicion(header_comp, eventos_list)
     except Exception:
         definicion = "90"
 
-    # shootoutScore por equipo desde el header
     shoot = {}
     try:
         for t in data.get("header", {}).get("competitions", [{}])[0].get("competitors", []):
@@ -514,11 +462,10 @@ def eventos(espn_id: str):
         "eventos":        eventos_list,
         "estadisticas":   estadisticas,
         "gameInfo":       game_info,
-        "definicion":     definicion,   # "90" | "ET" | "PEN"
-        "shootoutScores": shoot,        # {"Argentina": 4, "Francia": 2} o {}
+        "definicion":     definicion,
+        "shootoutScores": shoot,
         "total":          len(eventos_list),
     })
-
 
 
 @app.route("/debug/<espn_id>")
@@ -549,10 +496,9 @@ def health():
     return jsonify({"ok": True})
 
 
-
 @app.route("/debug/partidos")
 def debug_partidos():
-    """Endpoint de diagnostico — ver que devuelve ESPN crudo. SIN AUTH temporal."""
+    """Endpoint de diagnostico — ver que devuelve ESPN crudo."""
     err = _auth()
     if err: return err
 
@@ -561,7 +507,6 @@ def debug_partidos():
 
     result = {"fecha": fecha, "scoreboard": [], "event_refs": [], "calendar_error": None}
 
-    # Scoreboard
     try:
         sb_url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates={fecha}"
         sb_data = espn_get(sb_url)
@@ -570,7 +515,6 @@ def debug_partidos():
     except Exception as e:
         result["scoreboard_error"] = str(e)
 
-    # Calendar ondays
     try:
         cal_url = (
             f"https://sports.core.api.espn.com/v2/sports/soccer/leagues/fifa.world"
@@ -591,7 +535,6 @@ def debug_partidos():
 
 # ── Grupos / Standings ──────────────────────────────────────────────────────
 
-# Mapa de nombres openfootball → nombres ESPN/BANDERAS del bot
 _NOMBRE_MAP = {
     "Bosnia & Herzegovina": "Bosnia-Herzegovina",
     "Czech Republic":       "Czech Republic",
@@ -606,7 +549,6 @@ def _normalizar_nombre(nombre: str) -> str:
     return _NOMBRE_MAP.get(nombre, nombre)
 
 def _calcular_standings_desde_partidos(matches: list) -> dict:
-    """Calcula standings desde lista de partidos con score.ft."""
     from collections import defaultdict
     standings = defaultdict(dict)
 
@@ -644,7 +586,6 @@ def _calcular_standings_desde_partidos(matches: list) -> dict:
 
     return standings
 
-# Equipos de cada grupo para mostrar incluso los que no han jugado (0 pts)
 _GRUPOS_EQUIPOS = {
     "Group A": ["Mexico","South Korea","Czech Republic","South Africa"],
     "Group B": ["Canada","Bosnia & Herzegovina","Qatar","Switzerland"],
@@ -663,10 +604,6 @@ _GRUPOS_EQUIPOS = {
 
 @app.route("/grupos")
 def grupos():
-    """
-    Calcula standings de grupos del Mundial 2026 desde openfootball/worldcup.json.
-    Retorna: { grupos: [ { nombre, equipos: [{nombre, pj, pg, pe, pp, gf, gc, dg, pts}] } ] }
-    """
     err = _auth()
     if err: return err
 
@@ -679,7 +616,6 @@ def grupos():
     matches = data.get("matches", [])
     standings = _calcular_standings_desde_partidos(matches)
 
-    # Construir todos los grupos en orden A-L
     grupos_list = []
     for g_key in ["Group A","Group B","Group C","Group D","Group E","Group F",
                   "Group G","Group H","Group I","Group J","Group K","Group L"]:
@@ -703,12 +639,57 @@ def grupos():
                 "pts": s["pts"],
             })
 
-        # Ordenar: pts desc, dg desc, gf desc
         equipos.sort(key=lambda x: (-x["pts"], -x["dg"], -x["gf"]))
         grupos_list.append({"nombre": g_key, "equipos": equipos})
 
     app.logger.info(f"[grupos] {len(grupos_list)} grupos, {len([m for m in matches if m.get('score',{}).get('ft')])} partidos con resultado")
     return jsonify({"grupos": grupos_list, "total": len(grupos_list)})
+
+
+# ── MTA Stats ──────────────────────────────────────────────────────────────
+
+# Almacén en memoria: { "Lobito": { "money": 10, "points": 8190, ... } }
+_mta_stats = {}
+
+MTA_SECRET = os.getenv("MTA_SECRET", "cambiame_mta")
+
+@app.route("/mta/stats", methods=["POST"])
+def mta_stats_push():
+    """MTA empuja stats via fetchRemote cada vez que un jugador entra o sale."""
+    if request.headers.get("X-Mta-Key") != MTA_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True)
+    if not data or "nombre" not in data:
+        return jsonify({"error": "bad request"}), 400
+
+    nombre = data["nombre"]
+    _mta_stats[nombre] = {
+        "money":   data.get("money", 0),
+        "points":  data.get("points", 0),
+        "goals":   data.get("goals", 0),
+        "assists": data.get("assists", 0),
+        "saves":   data.get("saves", 0),
+    }
+    app.logger.info(f"[mta] stats actualizadas: {nombre}")
+    return jsonify({"ok": True})
+
+
+@app.route("/mta/stats", methods=["GET"])
+def mta_stats_get():
+    """El bot de Discord consulta stats de un jugador."""
+    err = _auth()
+    if err: return err
+
+    nombre = request.args.get("player")
+    if not nombre:
+        return jsonify({"players": list(_mta_stats.keys())})
+
+    stats = _mta_stats.get(nombre)
+    if not stats:
+        return jsonify({"error": "player not found"}), 404
+
+    return jsonify({"nombre": nombre, **stats})
 
 
 if __name__ == "__main__":
